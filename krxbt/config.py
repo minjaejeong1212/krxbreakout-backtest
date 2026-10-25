@@ -16,9 +16,11 @@ class Params:
     # ---------- 수렴 조건 (돌파 '전날' t-1 기준으로 계산) ----------
     range_window: int = 10             # 최근 10일 vs 그 직전 10일
     range_ratio_max: float = 0.70      # 최근 범위 / 직전 범위 ≤ 0.70
-    atr_period: int = 14
-    atr_fast: int = 5                  # ATR(14)의 최근 5일 평균
-    atr_slow: int = 20                 # ATR(14)의 최근 20일 평균
+    atr_period: int = 14               # 손절가 계산용 ATR(14)
+    atr_ratio_mode: str = "tr"         # "tr": 하루 변동폭(TR) 5일 평균 ÷ 20일 평균 (기본)
+                                       # "smoothed": ATR(14)의 5일 평균 ÷ 20일 평균 (원문, 5년 200종목에서 신호 2건뿐)
+    atr_fast: int = 5
+    atr_slow: int = 20
     atr_ratio_max: float = 0.75
     ma_trend: int = 20                 # 종가 > MA20, MA20 > 5일 전 MA20 (돌파일 t 기준)
     ma_slope_lag: int = 5

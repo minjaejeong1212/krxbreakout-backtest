@@ -15,9 +15,9 @@ from .config import Params
 REQUIRED = ["Open", "High", "Low", "Close", "Volume"]
 
 
-def wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
+def true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["Close"].shift(1)
-    tr = pd.concat(
+    return pd.concat(
         [
             df["High"] - df["Low"],
             (df["High"] - prev_close).abs(),
@@ -25,6 +25,10 @@ def wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
         ],
         axis=1,
     ).max(axis=1)
+
+
+def wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
+    tr = true_range(df)
     return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
@@ -65,8 +69,15 @@ def compute_signals(df: pd.DataFrame, p: Params) -> pd.DataFrame:
     prior_range = hi_prior - lo_prior
     out["range_ratio"] = recent_range / prior_range.replace(0, np.nan)
 
-    atr_fast = out["atr"].rolling(p.atr_fast).mean().shift(1)
-    atr_slow = out["atr"].rolling(p.atr_slow).mean().shift(1)
+    if p.atr_ratio_mode == "tr":
+        # 하루 변동폭(True Range)의 최근 5일 평균 ÷ 최근 20일 평균 (t-1 기준)
+        tr = true_range(out)
+        atr_fast = tr.rolling(p.atr_fast).mean().shift(1)
+        atr_slow = tr.rolling(p.atr_slow).mean().shift(1)
+    else:
+        # 원문 그대로: ATR(14)의 5일 평균 ÷ ATR(14)의 20일 평균 (ATR이 이미 평활돼서 거의 충족 안 됨)
+        atr_fast = out["atr"].rolling(p.atr_fast).mean().shift(1)
+        atr_slow = out["atr"].rolling(p.atr_slow).mean().shift(1)
     out["atr_ratio"] = atr_fast / atr_slow.replace(0, np.nan)
 
     converge = (out["range_ratio"] <= p.range_ratio_max) & (out["atr_ratio"] <= p.atr_ratio_max)
