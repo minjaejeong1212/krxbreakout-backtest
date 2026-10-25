@@ -3,21 +3,31 @@ name: 백테스트 실행
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "실행 종류 (ablation=단계별 비교·앞 3년, final=최종 검증·뒤 2년, backtest=한 번 실행)"
+        type: choice
+        options: [ablation, final, backtest]
+        default: ablation
       source:
-        description: "데이터 소스 (synthetic=가짜 데이터 시험, fdr=실제 주가)"
+        description: "데이터 소스 (fdr=실제 주가, synthetic=가짜 데이터 시험)"
         type: choice
         options: [fdr, synthetic]
         default: fdr
       limit:
         description: "종목 수 (숫자 입력, 전체 종목은 all)"
         required: false
-        default: "200"
+        default: "all"
+      preset:
+        description: "backtest 모드에서 쓸 규칙"
+        type: choice
+        options: [v2, v1]
+        default: v2
       start:
-        description: "시작일 (비우면 기본값 2021-10-25)"
+        description: "backtest 모드 시작일 (비우면 2021-10-25)"
         required: false
         default: ""
       end:
-        description: "종료일 (비우면 기본값 2026-10-23)"
+        description: "backtest 모드 종료일 (비우면 2026-10-23)"
         required: false
         default: ""
 
@@ -47,16 +57,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: cache
-          key: price-cache-${{ inputs.end || 'default' }}-${{ github.run_id }}
-          restore-keys: price-cache-${{ inputs.end || 'default' }}-
+          key: price-cache-v2-${{ github.run_id }}
+          restore-keys: price-cache-v2-
 
-      - name: 백테스트
+      - name: 실행
         run: |
-          ARGS="--source ${{ inputs.source }}"
-          if [ -n "${{ inputs.limit }}" ] && [ "${{ inputs.limit }}" != "all" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
-          if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
-          python run_backtest.py $ARGS
+          LIMIT=""
+          if [ -n "${{ inputs.limit }}" ] && [ "${{ inputs.limit }}" != "all" ]; then LIMIT="--limit ${{ inputs.limit }}"; fi
+          if [ "${{ inputs.mode }}" = "backtest" ]; then
+            ARGS="--source ${{ inputs.source }} --preset ${{ inputs.preset }} $LIMIT"
+            if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
+            if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
+            python run_backtest.py $ARGS
+          else
+            python validate.py --mode ${{ inputs.mode }} --source ${{ inputs.source }} $LIMIT
+          fi
 
       - name: 결과 요약을 실행 화면에 표시
         if: always()
@@ -81,7 +96,7 @@ jobs:
           git rm -rf . -q
           rm -rf cache
           cp -r /tmp/bt_results/. .
-          echo "실행: ${{ github.run_id }} / 소스: ${{ inputs.source }} / 종목수: ${{ inputs.limit }}" > RUN_INFO.txt
+          echo "실행: ${{ github.run_id }} / 모드: ${{ inputs.mode }} / 소스: ${{ inputs.source }} / 종목수: ${{ inputs.limit }} / 규칙: ${{ inputs.preset }}" > RUN_INFO.txt
           git add -A
           git commit -qm "백테스트 결과 run ${{ github.run_id }}"
           git push -f origin HEAD:results

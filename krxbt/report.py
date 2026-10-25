@@ -49,7 +49,10 @@ def summarize(eq: pd.DataFrame, trades: pd.DataFrame, p, benchmark: pd.Series | 
         s["손익비(평균수익/평균손실)"] = (
             round(float(wins["pnl"].mean() / -losses["pnl"].mean()), 2) if len(wins) and len(losses) and losses["pnl"].mean() < 0 else None
         )
-        s["Profit Factor"] = round(float(gross_win / gross_loss), 2) if gross_loss > 0 else None
+        if gross_loss > 0:
+            s["Profit Factor"] = round(float(gross_win / gross_loss), 2)
+        else:
+            s["Profit Factor"] = 99.99 if gross_win > 0 else None  # 손실 거래 없음
         s["최대 연속 손실 횟수"] = max_consecutive((closed.sort_values("exit_date")["pnl"] <= 0).tolist())
         s["평균 보유일(영업일)"] = round(float(closed["holding_days"].mean()), 1) if len(closed) else None
         s["청산 사유별 건수"] = closed["exit_reason"].value_counts().to_dict()

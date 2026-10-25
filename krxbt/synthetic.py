@@ -41,3 +41,13 @@ def make_universe(n_stocks=30, n=600, seed=42):
             df = df.iloc[: n // 2]
         data[code] = df
     return data
+
+
+def make_index(n=700, seed=7, start="2021-10-01"):
+    """가짜 지수 두 개 (시장 필터 테스트용)."""
+    out = {}
+    for k, s in (("KOSPI", seed), ("KOSDAQ", seed + 1)):
+        rng = np.random.default_rng(s)
+        dates = pd.bdate_range(start, periods=n)
+        out[k] = pd.Series(2500 * np.exp(np.cumsum(rng.normal(0.0003, 0.011, n))), index=dates)
+    return out

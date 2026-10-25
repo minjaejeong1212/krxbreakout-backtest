@@ -93,7 +93,22 @@ def compute_signals(df: pd.DataFrame, p: Params) -> pd.DataFrame:
     breakout = (out["Close"] >= out["resistance"] * p.breakout_buffer) & (out["vol_ratio"] >= p.vol_mult)
     liquid = out["avg_value_prev"] >= p.min_avg_value
 
+    # ---- v2: 시가총액 (종가 × 상장주식수 근사, 주식수 정보 없으면 이 조건은 통과) ----
+    if p.min_marcap > 0 and "Shares" in out.columns and out["Shares"].notna().any():
+        out["marcap"] = out["Close"] * out["Shares"]
+        size_ok = out["marcap"] >= p.min_marcap
+    else:
+        size_ok = pd.Series(True, index=out.index)
+
+    # ---- v2: 돌파 캔들 품질·과열 ----
+    day_range = (out["High"] - out["Low"]).replace(0, np.nan)
+    out["close_location"] = ((out["Close"] - out["Low"]) / day_range).fillna(1.0)
+    out["day_return"] = out["Close"] / out["Close"].shift(1) - 1
+    candle_ok = (out["close_location"] >= p.min_close_location) & (out["day_return"] <= p.max_day_return)
+
     out["ma_exit"] = out["Close"].rolling(p.exit_ma).mean()
 
-    out["signal"] = (converge & trend & breakout & liquid & out["tradeable"]).fillna(False).astype(bool)
+    out["signal"] = (
+        converge & trend & breakout & liquid & size_ok & candle_ok & out["tradeable"]
+    ).fillna(False).astype(bool)
     return out

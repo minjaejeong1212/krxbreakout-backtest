@@ -37,7 +37,10 @@ def get_universe(include_delisted: bool = True) -> pd.DataFrame:
     code_col = "Code" if "Code" in listed.columns else "Symbol"
     listed = listed.rename(columns={code_col: "code", "Name": "name", "Market": "market"})
     listed = listed[listed["market"].isin(["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"])]
-    listed = listed[["code", "name", "market"]].assign(delisted=False)
+    # 상장주식수 (시가총액 근사용). 열 이름이 버전마다 달라서 있는 것을 사용
+    shares_col = next((c for c in ["Stocks", "ListedShares", "Shares"] if c in listed.columns), None)
+    listed["shares"] = pd.to_numeric(listed[shares_col], errors="coerce") if shares_col else float("nan")
+    listed = listed[["code", "name", "market", "shares"]].assign(delisted=False)
 
     frames = [listed]
     if include_delisted:
@@ -47,7 +50,7 @@ def get_universe(include_delisted: bool = True) -> pd.DataFrame:
             if "SecuGroup" in dl.columns:
                 dl = dl[dl["SecuGroup"].astype(str).str.contains("주권")]
             dl = dl[dl["market"].astype(str).str.contains("KOSPI|KOSDAQ|유가|코스닥")]
-            frames.append(dl[["code", "name", "market"]].assign(delisted=True))
+            frames.append(dl[["code", "name", "market"]].assign(delisted=True, shares=float("nan")))
         except Exception as e:  # noqa: BLE001
             print(f"[경고] 상장폐지 목록 수집 실패 → 생존편향 있음: {e}")
 
@@ -150,3 +153,25 @@ def coverage_table(data: dict) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def attach_shares(data: dict, universe: pd.DataFrame) -> dict:
+    """현재 상장주식수를 일봉에 붙인다 (시가총액 = 종가 × 주식수 근사).
+    증자·감자·분할 이력은 반영되지 않는 근사치이고, 주식수를 모르는 종목은 시총 조건을 통과시킨다."""
+    if "shares" not in universe.columns:
+        return data
+    m = universe.set_index("code")["shares"].to_dict()
+    for code, df in data.items():
+        sh = m.get(code)
+        if sh is not None and sh == sh and sh > 0:
+            df["Shares"] = float(sh)
+    return data
+
+
+def load_index_ok(start: str, end: str, p) -> tuple[dict, dict]:
+    """KOSPI·KOSDAQ 지수 종가와 추세 통과 여부."""
+    import FinanceDataReader as fdr
+    from .backtest import index_trend_ok
+
+    closes = {"KOSPI": fdr.DataReader("KS11", start, end)["Close"], "KOSDAQ": fdr.DataReader("KQ11", start, end)["Close"]}
+    return closes, {k: index_trend_ok(v, p) for k, v in closes.items()}

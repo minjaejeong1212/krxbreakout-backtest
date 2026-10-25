@@ -1,18 +1,22 @@
-"""포트폴리오 백테스트 엔진 (일봉, 하루 단위 루프).
+"""포트폴리오 백테스트 엔진 (일봉, 하루 단위 루프). v1·v2 규칙을 설정으로 전환.
 
 하루 처리 순서
  1) 월 첫 거래일이면 추가 입금
  2) 전날 '10일선 이탈' 표시된 보유 종목 → 오늘 시가 청산
- 3) 전날 신호 종목 → 오늘 시가 진입 (갭 추격 회피·저항선 위 확인·손절폭 6% 확인)
+ 3) 진입 대기 종목 → 오늘 시가 진입
+      (갭 추격 회피·저항선 위 확인·손절폭 확인·하루 신규 매수 한도·계좌 낙폭 단계)
  4) 보유 종목 장중 점검
       - 시가가 이미 손절가 아래(갭 하락) → 시가에 전량 청산 (손실이 1R보다 커질 수 있음)
       - 저가가 손절가 터치 → 손절가에 전량 청산
         (같은 날 +2R 고가도 찍혔더라도 일봉으로는 순서를 알 수 없으므로 '손절 먼저' 가정)
-      - 아니면 고가가 +2R 이상 → 절반 익절 (시가가 이미 +2R 위면 시가 체결)
+      - 아니면 고가가 +2R 이상 → 절반 익절 (v2: 남은 물량 손절가를 본전으로)
       - 종가 < MA10 → 다음 날 시가 청산 표시
  5) 데이터가 끊기는(상장폐지 등) 보유 종목 강제 청산
  6) 종가로 평가
- 7) 오늘 신호 수집 → 다음 날 진입 대기열
+ 7) 신호 처리
+      v1: 오늘 신호 → 내일 시가 진입 대기
+      v2(confirm_next_day): 오늘 신호 → 내일 종가 확인 대기 → 확인되면 모레 시가 진입 대기
+      v2(market_filter): 진입 대기에 올리는 날 지수 추세가 나쁘면 버림
 """
 from __future__ import annotations
 
@@ -43,11 +47,30 @@ class Position:
     events: list = field(default_factory=list)
 
 
+def index_trend_ok(close: pd.Series, p: Params) -> pd.Series:
+    """지수 종가 > 장기 이평, 단기 이평이 N일 전보다 높음."""
+    ma_l = close.rolling(p.index_ma_long).mean()
+    ma_s = close.rolling(p.index_ma_short).mean()
+    return ((close > ma_l) & (ma_s > ma_s.shift(p.index_slope_lag))).fillna(False)
+
+
 class Backtester:
-    def __init__(self, data: dict[str, pd.DataFrame], p: Params):
-        """data: ticker -> compute_signals() 결과 DataFrame (DatetimeIndex)."""
+    def __init__(
+        self,
+        data: dict[str, pd.DataFrame],
+        p: Params,
+        ticker_market: dict[str, str] | None = None,
+        index_ok: dict[str, pd.Series] | None = None,
+    ):
+        """data: ticker -> compute_signals() 결과 DataFrame (DatetimeIndex).
+        ticker_market: ticker -> "KOSPI" | "KOSDAQ" (시장 필터용)
+        index_ok: "KOSPI"/"KOSDAQ" -> 날짜별 True/False (index_trend_ok 결과)"""
         self.p = p
         self.data = data
+        self.ticker_market = ticker_market or {}
+        self.index_ok = index_ok or {}
+        if p.market_filter and not self.index_ok:
+            raise ValueError("market_filter=True 인데 지수 데이터(index_ok)가 없습니다")
         start, end = pd.Timestamp(p.start), pd.Timestamp(p.end)
         all_dates = set()
         for df in data.values():
@@ -77,10 +100,11 @@ class Backtester:
         self.trades.append(
             {
                 "ticker": pos.ticker,
+                "market": self.ticker_market.get(pos.ticker, ""),
                 "entry_date": pos.entry_date,
                 "exit_date": date,
                 "entry_px": round(pos.entry_px, 2),
-                "stop": round(pos.stop, 2),
+                "init_stop": round(pos.entry_px - pos.init_risk_ps, 2),
                 "target_2r": round(pos.target, 2),
                 "shares": pos.init_shares,
                 "position_value": round(pos.entry_px * pos.init_shares),
@@ -96,6 +120,24 @@ class Backtester:
     def _equity(self):
         return self.cash + sum(pos.shares * pos.last_close for pos in self.positions.values())
 
+    def _market_ok(self, ticker, d) -> bool:
+        if not self.p.market_filter:
+            return True
+        mkt = self.ticker_market.get(ticker, "")
+        mkt = "KOSDAQ" if "KOSDAQ" in mkt else ("KOSPI" if "KOSPI" in mkt else mkt)
+        s = self.index_ok.get(mkt)
+        if s is None:
+            return False
+        return bool(s.get(d, False))
+
+    def _stop_for(self, sig, entry_ref: float) -> float:
+        """손절가 = 저항선 − k×ATR, 단 손절폭이 최소 비율보다 좁으면 최소 비율로 넓힘."""
+        p = self.p
+        stop = sig["resistance"] - p.stop_atr_mult * sig["atr"]
+        if p.min_stop_pct > 0 and (entry_ref - stop) / entry_ref < p.min_stop_pct:
+            stop = entry_ref * (1 - p.min_stop_pct)
+        return stop
+
     # ---------- 메인 루프 ----------
     def run(self):
         p = self.p
@@ -103,11 +145,13 @@ class Backtester:
         self.positions: dict[str, Position] = {}
         self.trades: list[dict] = []
         self.skipped: list[dict] = []
-        pending: list[dict] = []
+        to_enter: list[dict] = []     # 다음 날 시가 진입 대기
+        to_confirm: list[dict] = []   # 다음 날 종가 확인 대기 (v2)
         curve = []
         prev_equity = None
         prev_month = None
         total_deposit = float(p.initial_cash)
+        twr_idx, twr_peak = 1.0, 1.0
 
         for i, d in enumerate(self.calendar):
             # 1) 월 입금 (시작 월은 제외)
@@ -130,9 +174,24 @@ class Backtester:
 
             # 3) 신규 진입
             equity_now = self._equity()
-            for sig in sorted(pending, key=lambda s: s["priority"], reverse=True):
+            dd = 1 - twr_idx / twr_peak
+            risk = p.risk_per_trade
+            halt = False
+            if p.dd_tiers:
+                if dd >= p.dd_halt:
+                    halt = True
+                elif dd >= p.dd_half:
+                    risk = p.risk_per_trade * 0.5
+            new_today = 0
+            for sig in sorted(to_enter, key=lambda s: s["priority"], reverse=True):
                 t = sig["ticker"]
                 if t in self.positions:
+                    continue
+                if halt:
+                    self.skipped.append({**sig, "date": d, "reason": "dd_halt"})
+                    continue
+                if new_today >= p.max_new_per_day:
+                    self.skipped.append({**sig, "date": d, "reason": "max_new_per_day"})
                     continue
                 if len(self.positions) >= p.max_positions:
                     self.skipped.append({**sig, "date": d, "reason": "max_positions"})
@@ -142,19 +201,19 @@ class Backtester:
                     self.skipped.append({**sig, "date": d, "reason": "no_bar"})
                     continue
                 o = bar["Open"]
-                if o > sig["close"] * (1 + p.max_gap_up):
+                if o > sig["ref_close"] * (1 + p.max_gap_up):
                     self.skipped.append({**sig, "date": d, "reason": "gap_up"})
                     continue
                 if p.require_open_above_resistance and o <= sig["resistance"]:
                     self.skipped.append({**sig, "date": d, "reason": "open_below_resistance"})
                     continue
                 entry_px = o * (1 + p.slippage)
-                stop = sig["resistance"] - p.stop_atr_mult * sig["atr"]
+                stop = self._stop_for(sig, entry_px)
                 risk_ps = entry_px - stop
                 if risk_ps <= 0 or risk_ps / entry_px > p.max_stop_pct:
                     self.skipped.append({**sig, "date": d, "reason": "stop_too_wide"})
                     continue
-                shares = math.floor(equity_now * p.risk_per_trade / risk_ps)
+                shares = math.floor(equity_now * risk / risk_ps)
                 shares = min(shares, math.floor(equity_now * p.max_position_frac / entry_px))
                 shares = min(shares, math.floor(self.cash / (entry_px * (1 + p.commission))))
                 if shares < 1:
@@ -162,12 +221,13 @@ class Backtester:
                     continue
                 cost = shares * entry_px * (1 + p.commission)
                 self.cash -= cost
+                new_today += 1
                 self.positions[t] = Position(
                     ticker=t, entry_date=d, entry_px=entry_px, stop=stop, init_risk_ps=risk_ps,
                     init_shares=shares, shares=shares, target=entry_px + p.take_profit_r * risk_ps,
                     buy_cost=cost, last_close=bar["Close"],
                 )
-            pending = []
+            to_enter = []
 
             # 4) 장중 점검 + 종가 판단
             for pos in list(self.positions.values()):
@@ -180,8 +240,9 @@ class Backtester:
                     self._close_position(pos, d, "stop_gap")
                     continue
                 if l <= pos.stop:
-                    self._sell(pos, pos.shares, pos.stop, d, "stop")
-                    self._close_position(pos, d, "stop")
+                    reason = "breakeven_stop" if pos.partial_done and p.move_stop_to_breakeven else "stop"
+                    self._sell(pos, pos.shares, pos.stop, d, reason)
+                    self._close_position(pos, d, reason)
                     continue
                 if not pos.partial_done and h >= pos.target:
                     n = math.floor(pos.init_shares * p.take_profit_frac)
@@ -213,6 +274,8 @@ class Backtester:
             else:
                 twr_ret = (equity - deposit) / prev_equity - 1
             prev_equity = equity
+            twr_idx *= 1 + twr_ret
+            twr_peak = max(twr_peak, twr_idx)
             curve.append(
                 {
                     "date": d, "equity": equity, "cash": self.cash, "deposit": deposit,
@@ -221,22 +284,47 @@ class Backtester:
                 }
             )
 
-            # 7) 오늘 신호 → 내일 진입 대기 (마지막 날 신호는 버림)
-            if i < len(self.calendar) - 1:
-                for t in self.signals_by_date.get(d, []):
-                    bar = self._bar(t, d)
-                    if bar is None or not bar["signal"] or t in self.positions:
-                        continue
-                    pending.append(
-                        {
-                            "ticker": t, "signal_date": d, "close": bar["Close"],
-                            "resistance": bar["resistance"], "atr": bar["atr"],
-                            "vol_ratio": bar["vol_ratio"], "avg_value_prev": bar["avg_value_prev"],
-                            "priority": self._priority(bar),
-                        }
-                    )
+            if i >= len(self.calendar) - 1:
+                continue  # 마지막 날 신호는 버림
 
-        # 종료 시 미청산 포지션은 마지막 종가로 평가만 하고 '보유중'으로 기록
+            # 7a) 어제 신호의 오늘 종가 확인 (v2)
+            for sig in to_confirm:
+                t = sig["ticker"]
+                bar = self._bar(t, d)
+                if bar is None or t in self.positions:
+                    continue
+                stop_cand = sig["resistance"] - p.stop_atr_mult * sig["atr"]
+                if bar["Close"] < sig["resistance"]:
+                    self.skipped.append({**sig, "date": d, "reason": "confirm_close_below"})
+                    continue
+                if bar["Low"] <= stop_cand:
+                    self.skipped.append({**sig, "date": d, "reason": "confirm_hit_stop"})
+                    continue
+                if not self._market_ok(t, d):
+                    self.skipped.append({**sig, "date": d, "reason": "market_filter"})
+                    continue
+                to_enter.append({**sig, "ref_close": bar["Close"], "confirm_date": d})
+            to_confirm = []
+
+            # 7b) 오늘 신호
+            for t in self.signals_by_date.get(d, []):
+                bar = self._bar(t, d)
+                if bar is None or not bar["signal"] or t in self.positions:
+                    continue
+                sig = {
+                    "ticker": t, "signal_date": d, "ref_close": bar["Close"],
+                    "resistance": bar["resistance"], "atr": bar["atr"],
+                    "vol_ratio": bar["vol_ratio"], "avg_value_prev": bar["avg_value_prev"],
+                    "priority": self._priority(bar),
+                }
+                if p.confirm_next_day:
+                    to_confirm.append(sig)
+                elif self._market_ok(t, d):
+                    to_enter.append(sig)
+                else:
+                    self.skipped.append({**sig, "date": d, "reason": "market_filter"})
+
+        # 종료 시 미청산 포지션은 마지막 종가로 정리하고 end_of_test 로 표시 (통계에서 제외)
         last = self.calendar[-1] if len(self.calendar) else None
         for pos in list(self.positions.values()):
             self._sell(pos, pos.shares, pos.last_close, last, "end_of_test")
