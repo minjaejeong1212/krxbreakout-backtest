@@ -1,0 +1,68 @@
+name: 백테스트 실행
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "데이터 소스 (synthetic=가짜 데이터 시험, fdr=실제 주가)"
+        type: choice
+        options: [fdr, synthetic]
+        default: fdr
+      limit:
+        description: "종목 수 제한 (비우면 전체 종목, 처음엔 200 추천)"
+        required: false
+        default: "200"
+      start:
+        description: "시작일 (비우면 기본값 2021-10-25)"
+        required: false
+        default: ""
+      end:
+        description: "종료일 (비우면 기본값 2026-10-23)"
+        required: false
+        default: ""
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt pytest
+
+      - name: 단위 테스트
+        run: pytest -q
+
+      - name: 주가 데이터 캐시
+        if: inputs.source == 'fdr'
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: price-cache-${{ inputs.end || 'default' }}-${{ github.run_id }}
+          restore-keys: price-cache-${{ inputs.end || 'default' }}-
+
+      - name: 백테스트
+        run: |
+          ARGS="--source ${{ inputs.source }}"
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
+          if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
+          python run_backtest.py $ARGS
+
+      - name: 결과 요약을 실행 화면에 표시
+        if: always()
+        run: |
+          if [ -f results/report.md ]; then cat results/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: 결과 파일 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: results/

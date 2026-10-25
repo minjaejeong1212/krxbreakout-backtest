@@ -26,6 +26,14 @@ python run_backtest.py --source csv --data-dir krx_csv
 
 Google Colab에서는 저장소를 clone 한 뒤 같은 명령 앞에 `!` 를 붙이면 됩니다.
 
+### 깃허브에서 바로 실행 (설치 없음)
+
+1. 저장소 위쪽 **Actions** 탭 → 왼쪽 **백테스트 실행**
+2. 오른쪽 **Run workflow** → 소스·종목 수 입력 → 초록 **Run workflow** 버튼
+3. 실행이 끝나면(초록 체크) 클릭 → 화면에 요약 리포트, 맨 아래 **Artifacts → backtest-results** 에서 결과 파일 전체 다운로드
+
+한 번 받은 주가 데이터는 캐시에 저장돼서 다음 실행은 더 빠릅니다.
+
 ## 결과 파일 (`results/`)
 
 | 파일 | 내용 |
