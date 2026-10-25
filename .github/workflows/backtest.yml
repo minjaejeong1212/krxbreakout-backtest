@@ -21,6 +21,9 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: write
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -66,3 +69,19 @@ jobs:
         with:
           name: backtest-results
           path: results/
+
+      - name: 결과를 results 브랜치에 저장 (Claude가 읽을 수 있게)
+        if: always()
+        run: |
+          [ -d results ] || exit 0
+          cp -r results /tmp/bt_results
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan results-tmp
+          git rm -rf . -q
+          rm -rf cache
+          cp -r /tmp/bt_results/. .
+          echo "실행: ${{ github.run_id }} / 소스: ${{ inputs.source }} / 종목수: ${{ inputs.limit }}" > RUN_INFO.txt
+          git add -A
+          git commit -qm "백테스트 결과 run ${{ github.run_id }}"
+          git push -f origin HEAD:results

@@ -88,6 +88,27 @@ def main():
     if "KOSPI" in bench:
         b = bench["KOSPI"]
         summary["KOSPI 누적수익률(%)"] = round(float(b.iloc[-1] / b.iloc[0] - 1) * 100, 2)
+    # 진단 정보 (거래가 0건일 때 원인 파악용)
+    summary["[진단] 데이터 수집 성공 종목"] = len(data)
+    summary["[진단] 데이터 수집 실패 종목"] = len(failed)
+    if len(failed):
+        summary["[진단] 실패 예시"] = failed.head(3).to_dict("records")
+    summary["[진단] 매수 신호 수"] = len(sig_rows)
+    if not skipped.empty:
+        summary["[진단] 진입 안 한 이유"] = skipped["reason"].value_counts().to_dict()
+    if data:
+        lens = [len(df) for df in data.values()]
+        summary["[진단] 종목당 일봉 수(최소/중앙/최대)"] = f"{min(lens)} / {int(pd.Series(lens).median())} / {max(lens)}"
+        cond = {"수렴(범위)": 0, "수렴(ATR)": 0, "추세": 0, "돌파가격": 0, "거래량": 0, "거래대금": 0}
+        for df in data.values():
+            w = df[(df.index >= p.start) & (df.index <= p.end)]
+            cond["수렴(범위)"] += int((w["range_ratio"] <= p.range_ratio_max).sum())
+            cond["수렴(ATR)"] += int((w["atr_ratio"] <= p.atr_ratio_max).sum())
+            cond["추세"] += int(((w["Close"] > w["ma_trend"])).sum())
+            cond["돌파가격"] += int((w["Close"] >= w["resistance"] * p.breakout_buffer).sum())
+            cond["거래량"] += int((w["vol_ratio"] >= p.vol_mult).sum())
+            cond["거래대금"] += int((w["avg_value_prev"] >= p.min_avg_value).sum())
+        summary["[진단] 조건별 충족 일수(종목 합계)"] = cond
 
     eq.to_csv(os.path.join(args.out, "equity.csv"))
     trades.to_csv(os.path.join(args.out, "trades.csv"), index=False)
