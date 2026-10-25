@@ -9,7 +9,7 @@ on:
         options: [fdr, synthetic]
         default: fdr
       limit:
-        description: "종목 수 제한 (비우면 전체 종목, 처음엔 200 추천)"
+        description: "종목 수 (숫자 입력, 전체 종목은 all)"
         required: false
         default: "200"
       start:
@@ -53,7 +53,7 @@ jobs:
       - name: 백테스트
         run: |
           ARGS="--source ${{ inputs.source }}"
-          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ -n "${{ inputs.limit }}" ] && [ "${{ inputs.limit }}" != "all" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
           if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
           if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
           python run_backtest.py $ARGS
