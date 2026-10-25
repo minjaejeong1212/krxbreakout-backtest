@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+cache/
+results/
+krx_csv/
+.ipynb_checkpoints/
+.DS_Store
